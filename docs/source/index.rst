@@ -20,6 +20,13 @@ This codebase serves as the foundation for:
 - **Decoupled WBC** models used in NVIDIA Isaac-Gr00t, Gr00t N1.5 and N1.6 (see :doc:`detailed reference <references/decoupled_wbc>`)
 - **GEAR-SONIC Series**: State-of-the-art controllers from the GEAR team
 
+News
+----
+
+- **[2026-03-16]** We open-sourced `BONES-SEED <https://huggingface.co/datasets/bones-studio/seed>`_ — a large-scale human motion dataset (142K+ motions, ~288 hours) with Unitree G1 MuJoCo-compatible trajectories — a large subset of training data for SONIC.
+- **[2026-02-19]** Released GEAR-SONIC with pretrained policy checkpoints, C++ inference stack, VR teleoperation stack, and documentation.
+- **[2025-11-12]** Initial release of GR00T-WholeBodyControl with Decoupled WBC for GR00T N1.5 and N1.6.
+
 GEAR-SONIC
 ----------
 .. image:: _static/sonic-preview-gif-480P.gif
@@ -87,6 +94,7 @@ Documentation
    :caption: Best Practices
 
    user_guide/teleoperation
+   user_guide/training_data
 
 ..    user_guide/configuration
 ..    user_guide/training

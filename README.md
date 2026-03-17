@@ -27,8 +27,15 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 - **Decoupled WBC**: the decoupled controller (RL for lower body, and IK for upper body) used in NVIDIA GR00T [N1.5](https://research.nvidia.com/labs/gear/gr00t-n1_5/) and [N1.6](https://research.nvidia.com/labs/gear/gr00t-n1_6/) models;
 - **GEAR-SONIC Series**: our latest iteration of generalist humanoid whole-body controllers (see our [whitepaper](https://nvlabs.github.io/GEAR-SONIC/)).
 
+## News
+
+- **[2026-03-16]** We open-sourced [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed) — a large-scale human motion dataset (142K+ motions, ~288 hours) with Unitree G1 MuJoCo-compatible trajectories (a large subset of SONIC training code!). 
+- **[2026-02-19]** Released GEAR-SONIC with pretrained policy checkpoints, C++ inference stack, VR teleoperation stack, and documentation.
+- **[2025-11-12]** Initial release of GR00T-WholeBodyControl with Decoupled WBC for GR00T N1.5 and N1.6.
+
 ## Table of Contents
 
+- [News](#news)
 - [GEAR-SONIC](#gear-sonic)
 - [VR Whole-Body Teleoperation](#vr-whole-body-teleoperation)
 - [Kinematic Planner](#kinematic-planner)
