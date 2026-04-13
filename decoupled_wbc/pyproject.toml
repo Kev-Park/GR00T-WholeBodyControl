@@ -21,7 +21,7 @@ dependencies = [
     "scipy==1.15.3",
     "torch",
 ]
-license = {file = "../LICENSE"}
+license = "Apache-2.0"
 
 [project.optional-dependencies]
 # Full: all dependencies for the complete decoupled_wbc project
