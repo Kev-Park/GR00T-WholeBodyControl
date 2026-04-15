@@ -1898,6 +1898,8 @@ def run_pico_manager(
     # Track which mode VR_3PT was entered from, so left_axis_click returns to it.
     # Will be either PLANNER or PLANNER_FROZEN_UPPER_BODY.
     vr3pt_parent_mode = StreamMode.PLANNER
+    prev_toggle_dc = False
+    prev_toggle_da = False
     try:
         prev_ax_pressed = False
         prev_by_pressed = False
@@ -1907,7 +1909,7 @@ def run_pico_manager(
             # Poll Pico controller for buttons/axes
             a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
 
-            left_menu_button, _, _, _, _ = get_controller_inputs()
+            left_menu_button, _, _, left_grip_mgr, _ = get_controller_inputs()
 
             left_axis_click, _ = get_axis_clicks()
 
@@ -2035,6 +2037,24 @@ def run_pico_manager(
 
                 print(f"[Manager] StreamMode switch: {current_mode.name} -> {new_mode.name}")
                 current_mode = new_mode
+
+            # Mode-independent: send manager_state for data exporter
+            toggle_dc_tmp = bool(a_pressed) and left_grip_mgr > 0.5
+            toggle_da_tmp = bool(b_pressed) and left_grip_mgr > 0.5
+            toggle_dc = toggle_dc_tmp and not prev_toggle_dc
+            toggle_da = toggle_da_tmp and not prev_toggle_da
+            prev_toggle_dc = toggle_dc_tmp
+            prev_toggle_da = toggle_da_tmp
+            socket.send(
+                pack_pose_message(
+                    {
+                        "stream_mode": np.array([current_mode.value], dtype=np.int32),
+                        "toggle_data_collection": np.array([toggle_dc], dtype=bool),
+                        "toggle_data_abort": np.array([toggle_da], dtype=bool),
+                    },
+                    topic="manager_state",
+                )
+            )
 
             prev_ax_pressed = ax_pressed
             prev_by_pressed = by_pressed

@@ -2,7 +2,11 @@
 
 Get started with SONIC in minutes!
 
- First, ensure you've completed the [installation guide](installation_deploy).
+```{admonition} Prerequisites
+:class: note
+1. **Completed the [Installation Guide](installation_deploy)** — TensorRT is installed, the repo is cloned, and the C++ deployment is built.
+2. **Downloaded the model checkpoints** — run `python download_from_hf.py` from the repo root. See [Downloading Model Checkpoints](download_models) for details.
+```
 
 ```{admonition} Safety Warning
 :class: danger

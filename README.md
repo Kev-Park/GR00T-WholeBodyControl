@@ -10,8 +10,9 @@
 <div align="center">
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-76B900.svg)](LICENSE)
-[![IsaacLab](https://img.shields.io/badge/IsaacLab-2.3.0-orange.svg)](https://github.com/isaac-sim/IsaacLab/releases/tag/v2.3.0)
+[![IsaacLab](https://img.shields.io/badge/IsaacLab-2.3.2-orange.svg)](https://github.com/isaac-sim/IsaacLab/releases/tag/v2.3.2)
 [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-76B900.svg)](https://nvlabs.github.io/GR00T-WholeBodyControl/)
+[![Demo](https://img.shields.io/badge/Live%20Demo-GEAR--SONIC-blue.svg)](https://nvlabs.github.io/GEAR-SONIC/demo.html)
 
 </div>
 
@@ -29,10 +30,12 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 
 ## News
 
-- **[2026-03-24]** Update the C++ inference stack: motor error monitoring and temperature reporting (with TTS alerts and MuJoCo heatmap visualization); support streamed token input via ZMQ protocol v4; idle-mode error-based readaptation; TRT engine output now co-located with ONNX model; **ZMQ header size changed to 1280 bytes**
-- **[2026-03-16]** [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed) is now open-sourced! A large-scale human motion dataset (142K+ motions, ~288 hours) with Unitree G1 MuJoCo-compatible trajectories (a large subset of SONIC training data!).
-- **[2026-02-19]** Released GEAR-SONIC with pretrained policy checkpoints, C++ inference stack, VR teleoperation stack, and documentation.
-- **[2025-11-12]** Initial release of GR00T-WholeBodyControl with Decoupled WBC for GR00T N1.5 and N1.6.
+- **[2026-04-14]** 🌐 **[Live web demo](https://nvlabs.github.io/GEAR-SONIC/demo.html)** — try SONIC interactively in your browser. Features [Kimodo](https://github.com/nv-tlabs/kimodo) text-to-motion generation.
+- **[2026-04-10]** 🚀 Released **SONIC training code and checkpoint** on [HuggingFace](https://huggingface.co/nvidia/GEAR-SONIC). Train from scratch or finetune. **Additional embodiment support** and **VLA data collection pipeline**. See [Training Guide](https://nvlabs.github.io/GR00T-WholeBodyControl/user_guide/training.html).
+- **[2026-03-24]** 🔧 C++ inference stack update: motor error monitoring, TTS alerts, ZMQ protocol v4, idle-mode readaptation. **ZMQ header size changed to 1280 bytes.**
+- **[2026-03-16]** 📦 [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed) open-sourced — 142K+ human motions (~288 hours) with G1 MuJoCo trajectories.
+- **[2026-02-19]** 🎉 Released GEAR-SONIC: pretrained checkpoints, C++ inference, VR teleoperation, and documentation.
+- **[2025-11-12]** 🏁 Initial release with Decoupled WBC for GR00T N1.5 and N1.6.
 
 ## Table of Contents
 
@@ -40,6 +43,7 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 - [GEAR-SONIC](#gear-sonic)
 - [VR Whole-Body Teleoperation](#vr-whole-body-teleoperation)
 - [Kinematic Planner](#kinematic-planner)
+- [SONIC Training](#sonic-training)
 - [TODOs](#todos)
 - [What's Included](#whats-included)
   - [Setup](#setup)
@@ -66,7 +70,7 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 
 SONIC is a humanoid behavior foundation model that gives robots a core set of motor skills learned from large-scale human motion data. Rather than building separate controllers for predefined motions, SONIC uses motion tracking as a scalable training task, enabling a single unified policy to produce natural, whole-body movement and support a wide range of behaviors — from walking and crawling to teleoperation and multi-modal control. It is designed to generalize beyond the motions it has seen during training and to serve as a foundation for higher-level planning and interaction.
 
-In this repo, we will release SONIC's training code, deployment framework, model checkpoints, and teleoperation stack for data collection.
+In this repo, we release SONIC's training code, deployment framework, model checkpoints, and teleoperation stack for data collection.
 
 
 ## VR Whole-Body Teleoperation
@@ -157,13 +161,50 @@ SONIC includes a kinematic planner for real-time locomotion generation — choos
 </table>
 </div>
 
+## SONIC Training
+
+SONIC can be trained from scratch on the [Bones-SEED](https://huggingface.co/datasets/bones-studio/seed)
+motion capture dataset (142K+ motions, ~288 hours, Unitree G1 retargeted), or finetuned
+from the released checkpoint on [Hugging Face](https://huggingface.co/nvidia/GEAR-SONIC).
+
+### Quick start
+
+```bash
+# Install training dependencies (Isaac Lab must be installed separately — see docs)
+pip install -e "gear_sonic/[training]"
+
+# Download checkpoint + SMPL data from Hugging Face
+pip install huggingface_hub
+python download_from_hf.py --training
+
+# Download Bones-SEED G1 CSVs from bones-studio.ai/seed, then convert and filter
+python gear_sonic/data_process/convert_soma_csv_to_motion_lib.py \
+    --input /path/to/bones_seed/g1/csv/ \
+    --output data/motion_lib_bones_seed/robot --fps 30 --fps_source 120 --individual --num_workers 16
+python gear_sonic/data_process/filter_and_copy_bones_data.py \
+    --source data/motion_lib_bones_seed/robot --dest data/motion_lib_bones_seed/robot_filtered
+
+# Finetune from released checkpoint (64+ GPUs recommended)
+accelerate launch --num_processes=8 gear_sonic/train_agent_trl.py \
+    +exp=manager/universal_token/all_modes/sonic_release \
+    +checkpoint=sonic_release/last.pt \
+    num_envs=4096 headless=True \
+    ++manager_env.commands.motion.motion_lib_cfg.motion_file=data/motion_lib_bones_seed/robot_filtered \
+    ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=data/smpl_filtered
+```
+
+For the full guide including multi-node training, evaluation, ONNX export, and SOMA encoder setup:
+📖 [Installation (Training)](https://nvlabs.github.io/GR00T-WholeBodyControl/getting_started/installation_training.html) |
+[Training Guide](https://nvlabs.github.io/GR00T-WholeBodyControl/user_guide/training.html)
+
+
 ## TODOs
 
 - [x] Release pretrained SONIC policy checkpoints
 - [x] Open source C++ inference stack
 - [x] Setup documentation
 - [x] Open source teleoperation stack and demonstration scripts
-- [ ] Release training scripts and recipes for motion imitation and fine-tuning
+- [x] Release training scripts and recipes for motion imitation and fine-tuning
 - [ ] Open source large-scale data collection workflows and fine-tuning VLA scripts. 
 - [ ] Publish additional preprocessed large-scale human motion datasets
 
@@ -174,16 +215,37 @@ SONIC includes a kinematic planner for real-time locomotion generation — choos
 This release includes:
 
 - **`gear_sonic_deploy`**: C++ inference stack for deploying SONIC policies on real hardware
-- **`gear_sonic`**: Teleoperation stack for collecting demonstration data (no training code, YET.)
+- **`gear_sonic`**: Full SONIC training stack — PPO training, data processing pipeline, and configuration system for training on Bones-SEED and custom motion datasets
 
 ### Setup
 
-Clone the repository with Git LFS:
+> **Git LFS required.** This repo contains large binary assets (meshes, ONNX
+> models). Without Git LFS, you will get small pointer files instead of actual
+> data, causing silent failures. Install Git LFS first if you don't have it:
+> `sudo apt install git-lfs && git lfs install`
+
 ```bash
 git clone https://github.com/NVlabs/GR00T-WholeBodyControl.git
 cd GR00T-WholeBodyControl
 git lfs pull
+
+# Verify your environment
+python check_environment.py
 ```
+
+### Which environment do I need?
+
+| I want to... | Environment | How to install |
+|---|---|---|
+| **Train / finetune SONIC** | Isaac Lab's Python env | [Install Isaac Lab](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html), then `pip install -e "gear_sonic/[training]"` |
+| **Run MuJoCo simulation** | `.venv_sim` (auto-created) | `bash install_scripts/install_mujoco_sim.sh` |
+| **VR teleoperation** | `.venv_teleop` (auto-created) | `bash install_scripts/install_pico.sh` |
+| **Collect data** | `.venv_data_collection` (auto-created) | `bash install_scripts/install_data_collection.sh` |
+| **Deploy on real robot** | C++ build | See [deployment docs](https://nvlabs.github.io/GR00T-WholeBodyControl/getting_started/installation_deploy.html) |
+
+Each use case has its own lightweight environment. The install scripts use `uv`
+and create isolated venvs automatically — you don't need to manage them manually.
+Training is the only one that requires Isaac Lab (installed separately).
 
 ## Documentation
 
@@ -199,6 +261,11 @@ git lfs pull
 - [Gamepad Control](https://nvlabs.github.io/GR00T-WholeBodyControl/tutorials/gamepad.html)
 - [ZMQ Communication](https://nvlabs.github.io/GR00T-WholeBodyControl/tutorials/zmq.html)
 - [ZMQ Manager / PICO VR](https://nvlabs.github.io/GR00T-WholeBodyControl/tutorials/vr_wholebody_teleop.html)
+
+### Training
+- [Installation (Training)](https://nvlabs.github.io/GR00T-WholeBodyControl/getting_started/installation_training.html)
+- [Training Guide](https://nvlabs.github.io/GR00T-WholeBodyControl/user_guide/training.html)
+- [Training Data](https://nvlabs.github.io/GR00T-WholeBodyControl/user_guide/training_data.html)
 
 ### Best Practices
 - [Teleoperation](https://nvlabs.github.io/GR00T-WholeBodyControl/user_guide/teleoperation.html)
@@ -242,7 +309,7 @@ All required legal documents, including the Apache 2.0 license, 3rd-party attrib
 
 ## Support
 
-For questions and issues, please contact the GEAR WBC team at [gear-wbc@nvidia.com](gear-wbc@nvidia.com) to provide feedback! 
+For questions and issues, please contact the GEAR WBC team at [gear-wbc@nvidia.com](mailto:gear-wbc@nvidia.com) to provide feedback! 
 
 ## Decoupled WBC
 
