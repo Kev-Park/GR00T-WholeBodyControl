@@ -1,15 +1,17 @@
 """Dry-run replay of a producer HDF5 rollout through the teleop retargeting IK.
 
-Reads ``teleop/left_wrist`` and ``teleop/right_wrist`` (pelvis-frame 4x4 matrices)
-from a producer HDF5 file and injects them directly into ``TeleopRetargetingIK``'s
-``set_goal`` API, bypassing the wrist pre-processor and the streamer abstraction.
-Per-frame upper-body joint targets are collected and optionally written to an
-``.npy`` file for inspection.
+Reads ``data/demo_0/teleop/left_wrist`` and ``data/demo_0/teleop/right_wrist``
+(pelvis-frame 4x4 matrices) from a producer HDF5 file (Part A v2,
+robomimic-style layout, ``schema_version=2``) and injects them directly into
+``TeleopRetargetingIK``'s ``set_goal`` API, bypassing the wrist pre-processor
+and the streamer abstraction. Per-frame upper-body joint targets are collected
+and optionally written to an ``.npy`` file for inspection.
 
 With ``--overlay-fingers``, recorded finger joint angles from
-``teleop/finger_joints`` are used to overwrite the hand slots of each target,
-bypassing the hand IK solver. Requires that the HDF5 joint names are a superset
-of the consumer's canonical Dex3 joint names (confirmed CASE 1 during planning).
+``data/demo_0/teleop/finger_joints`` are used to overwrite the hand slots of
+each target, bypassing the hand IK solver. Requires that the HDF5 joint names
+are a superset of the consumer's canonical Dex3 joint names (confirmed CASE 1
+during planning).
 
 This script is intentionally minimal: no sim env, no ROS, no WBC policy. It
 isolates the IK injection path as a first-order correctness check on a new
@@ -38,7 +40,8 @@ from decoupled_wbc.control.teleop.solver.hand.instantiation.g1_hand_ik_instantia
 )
 from decoupled_wbc.control.teleop.teleop_retargeting_ik import TeleopRetargetingIK
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+TELEOP_GROUP_PATH = "data/demo_0/teleop"
 
 
 @dataclass
@@ -64,9 +67,13 @@ def _decode_attr(value: object, default: str = "") -> str:
 
 def load_hdf5(path: Path) -> HDF5TeleopFrames:
     with h5py.File(path, "r") as f:
-        if "teleop" not in f:
-            raise RuntimeError(f"{path}: HDF5 has no /teleop group")
-        g = f["teleop"]
+        if TELEOP_GROUP_PATH not in f:
+            raise RuntimeError(
+                f"{path}: HDF5 has no /{TELEOP_GROUP_PATH} group "
+                f"(expected Part A v2 robomimic-style layout). "
+                f"If this file was produced with Part A v1, regenerate with the v2 producer."
+            )
+        g = f[TELEOP_GROUP_PATH]
 
         schema = int(g.attrs.get("schema_version", 0))
         if schema != SCHEMA_VERSION:
