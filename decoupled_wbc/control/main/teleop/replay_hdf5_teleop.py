@@ -290,9 +290,22 @@ def main() -> None:
 
         targets[i] = target_upper
 
-        if i == 0 or i == num_frames - 1:
-            tag = "first" if i == 0 else "last"
-            print(f"[frame {i:04d} {tag}] target_upper_body_pose={target_upper}")
+    # Print representative frames. Including mid-trajectory and peak-magnitude
+    # frames so endpoint-only behavior (e.g. fingers near zero at start/end of a
+    # reach-grasp-release rollout) isn't mistaken for "fingers never moved".
+    key_frames = [
+        (0, "first"),
+        (num_frames // 4, "25%"),
+        (num_frames // 2, "50%"),
+        (3 * num_frames // 4, "75%"),
+        (num_frames - 1, "last"),
+    ]
+    peak_idx = int(np.argmax(np.linalg.norm(targets, axis=1)))
+    if peak_idx not in [f[0] for f in key_frames]:
+        key_frames.append((peak_idx, "peak"))
+    key_frames.sort(key=lambda f: f[0])
+    for idx, tag in key_frames:
+        print(f"[frame {idx:04d} {tag:>5s}] target_upper_body_pose={targets[idx]}")
 
     print(
         f"[stats] targets shape={targets.shape} "
@@ -304,6 +317,18 @@ def main() -> None:
         f"[stats] |target[-1] - target[0]|_inf={np.max(np.abs(delta)):.6f} "
         f"|...|_2={np.linalg.norm(delta):.6f}"
     )
+
+    if args.overlay_fingers:
+        left_finger_trace = targets[:, left_slots]
+        right_finger_trace = targets[:, right_slots]
+        print(
+            f"[fingers left ] ptp per joint={left_finger_trace.ptp(axis=0)} "
+            f"max|.|={np.max(np.abs(left_finger_trace)):.4f}"
+        )
+        print(
+            f"[fingers right] ptp per joint={right_finger_trace.ptp(axis=0)} "
+            f"max|.|={np.max(np.abs(right_finger_trace)):.4f}"
+        )
 
     if args.save_targets is not None:
         args.save_targets.parent.mkdir(parents=True, exist_ok=True)
