@@ -8,10 +8,14 @@ a LeRobot v2.1 dataset whose feature schema matches
 Run under ``.venv_data_collection`` (provisioned via
 ``bash install_scripts/install_data_collection.sh``).
 
-Several feature slots that have no Isaac-Lab analog are zero-filled in v1
+Several feature slots that have no Isaac-Lab analog are zero-filled
 (see ``ZERO_FILLED_FIELDS`` and the dataset's ``meta/info.json`` script_config).
-A v2 follow-up may run ``model_encoder.onnx`` to populate
+A later revision may run ``model_encoder.onnx`` to populate
 ``action.motion_token`` from the recorded teleop fields.
+
+Converter v2 (current): planner_{movement,speed,facing,height,mode} are
+derived per-frame from ``root_pos_w`` / ``root_quat_w`` so the VLA learns
+real locomotion commands. v1 hardcoded them to stationary-task constants.
 """
 
 from __future__ import annotations
@@ -283,14 +287,53 @@ def convert_one_rollout(
     zero_smpl_frame_idx = np.array([0], dtype=np.int64)
     zero_delta_heading = np.zeros(1, dtype=np.float64)
 
-    # Planner-mode constants (stationary pick task).
-    stand_planner_mode = np.array([0], dtype=np.int32)
-    zero_planner_movement = np.zeros(3, dtype=np.float32)
-    forward_planner_facing = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-    zero_planner_speed = np.zeros(1, dtype=np.float32)
-    planner_height_const = np.array(
-        [float(np.mean(raw["root_pos_w"][:n_frames, 2]))],
-        dtype=np.float32,
+    # Per-frame planner commands derived from recorded root motion, matching
+    # the kinematic planner ONNX input semantics (see gear_sonic_deploy's
+    # localmotion_kplanner.hpp for the mode-speed range table).
+    step_dt = raw["step_dt"] if raw["step_dt"] > 0.0 else 1.0 / 50.0
+    root_pos = raw["root_pos_w"][:n_frames].astype(np.float64)
+    root_quat_wxyz = raw["root_quat_w"][:n_frames].astype(np.float64)
+
+    # 3D root velocity via central differences (world frame, MuJoCo Z-up).
+    planner_movement_all = np.gradient(root_pos, step_dt, axis=0).astype(np.float32)
+
+    # Horizontal speed magnitude.
+    planner_speed_all = np.linalg.norm(
+        planner_movement_all[:, :2], axis=1, keepdims=True
+    ).astype(np.float32)
+
+    # Forward unit vector: world-frame direction the torso faces, derived by
+    # rotating [1, 0, 0] (body forward) by the root quaternion.
+    root_quat_xyzw = np.stack(
+        [
+            root_quat_wxyz[:, 1],
+            root_quat_wxyz[:, 2],
+            root_quat_wxyz[:, 3],
+            root_quat_wxyz[:, 0],
+        ],
+        axis=1,
+    )
+    planner_facing_all = (
+        R.from_quat(root_quat_xyzw).apply(np.array([1.0, 0.0, 0.0])).astype(np.float32)
+    )
+
+    # Per-frame base height (not episode mean — real locomotion may vary z).
+    planner_height_all = root_pos[:, 2:3].astype(np.float32)
+
+    # Mode from horizontal speed: 0=IDLE, 1=SLOW_WALK, 2=WALK, 3=RUN.
+    def _speed_to_mode(s: float) -> int:
+        s = abs(float(s))
+        if s < 0.1:
+            return 0
+        if s < 0.8:
+            return 1
+        if s < 2.5:
+            return 2
+        return 3
+
+    planner_mode_all = np.array(
+        [[_speed_to_mode(float(s))] for s in planner_speed_all.flatten()],
+        dtype=np.int32,
     )
 
     stream_mode = np.array([5], dtype=np.int32)
@@ -364,11 +407,11 @@ def convert_one_rollout(
             "teleop.left_wrist_joints": left_wrist_joints,
             "teleop.right_wrist_joints": right_wrist_joints,
             "teleop.stream_mode": stream_mode.copy(),
-            "teleop.planner_mode": stand_planner_mode.copy(),
-            "teleop.planner_movement": zero_planner_movement.copy(),
-            "teleop.planner_facing": forward_planner_facing.copy(),
-            "teleop.planner_speed": zero_planner_speed.copy(),
-            "teleop.planner_height": planner_height_const.copy(),
+            "teleop.planner_mode": planner_mode_all[i].copy(),
+            "teleop.planner_movement": planner_movement_all[i].copy(),
+            "teleop.planner_facing": planner_facing_all[i].copy(),
+            "teleop.planner_speed": planner_speed_all[i].copy(),
+            "teleop.planner_height": planner_height_all[i].copy(),
             "teleop.vr_3pt_position": vr_3pt_position,
             "teleop.vr_3pt_orientation": vr_3pt_orientation,
         }
@@ -496,7 +539,15 @@ def main() -> None:
         "source": "isaac_lab_hdf5_converted",
         "source_schema": "producer HDF5 v2 (Part A v2, robomimic-layout)",
         "converter": "convert_isaac_hdf5_to_lerobot.py",
-        "converter_version": 1,
+        "converter_version": 2,
+        "planner_fields_source": (
+            "derived from root_pos_w / root_quat_w in the source HDF5: "
+            "planner_movement = world-frame root velocity via np.gradient; "
+            "planner_speed = horizontal speed; planner_facing = R(root_quat) @ [1,0,0]; "
+            "planner_height = root_pos_w[:, 2]; "
+            "planner_mode via speed_to_mode thresholds from "
+            "gear_sonic_deploy/.../localmotion_kplanner.hpp"
+        ),
         "producer": first_raw["env_args"].get("producer", "unknown"),
         "producer_version": first_raw["env_args"].get("producer_version", 0),
         "task_name": first_raw["env_args"].get("task_name"),
