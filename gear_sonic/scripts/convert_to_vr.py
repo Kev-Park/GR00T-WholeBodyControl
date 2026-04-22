@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 import torch
 import pytorch_kinematics as pk
+from scipy.ndimage import gaussian_filter1d
 from scipy.spatial.transform import Rotation as R
 
 from gear_sonic.data.exporter import Gr00tDataExporter
@@ -95,6 +96,15 @@ def _mat_to_quat_wxyz(rot_mat: np.ndarray) -> np.ndarray:
         [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]],
         dtype=np.float64,
     )
+
+
+def _se3_to_rot6d(T: np.ndarray) -> np.ndarray:
+    """Extract 6D rotation directly from a 4x4 SE3 (first two columns of R, flattened).
+
+    Avoids the redundant rot_mat -> quat -> rot_mat round-trip used in the
+    original quat_to_rot6d(_mat_to_quat_wxyz(...)) call chain.
+    """
+    return T[:3, :2].T.ravel().astype(np.float32)
 
 
 def _apply_local_offset(T: np.ndarray, offset: np.ndarray) -> np.ndarray:
@@ -183,6 +193,7 @@ def convert_one_pkl(
     fps: float,
     rollout_index: int,
     max_frames: int | None = None,
+    fk_smooth_sigma: float = 1.5,
 ) -> int:
     print(f"[rollout {rollout_index}] loading {pkl_path.name}")
     with open(pkl_path, "rb") as f:
@@ -202,9 +213,18 @@ def convert_one_pkl(
 
     q_gs_all = _permute_with_zero_fill(joints_np.astype(np.float64), body_perm)
 
+    # Smooth joint angles for FK only — reduces wrist orientation noise that
+    # gets amplified into ~mm-scale position jumps via the 18 cm local offset.
+    # Raw joints are kept in q_gs_all so observation.state / action.wbc are unaffected.
+    joints_fk = (
+        gaussian_filter1d(joints_np.astype(np.float64), sigma=fk_smooth_sigma, axis=0)
+        if fk_smooth_sigma > 0.0
+        else joints_np
+    )
+
     # FK -> wrist/torso SE3 in root (pelvis) frame, same convention as the
     # pelvis-relative 4x4 matrices stored in the HDF5 teleop group.
-    link_se3 = _run_fk_batch(chain, joints_np)
+    link_se3 = _run_fk_batch(chain, joints_fk)
     lw_se3 = link_se3.get(LEFT_WRIST_LINK)
     rw_se3 = link_se3.get(RIGHT_WRIST_LINK)
     torso_se3 = link_se3.get(TORSO_LINK)
@@ -280,9 +300,9 @@ def convert_one_pkl(
         )
         vr_3pt_orientation = np.concatenate(
             [
-                quat_to_rot6d(_mat_to_quat_wxyz(lw[:3, :3]).astype(np.float32)),
-                quat_to_rot6d(_mat_to_quat_wxyz(rw[:3, :3]).astype(np.float32)),
-                quat_to_rot6d(_mat_to_quat_wxyz(tp[:3, :3]).astype(np.float32)),
+                _se3_to_rot6d(lw),
+                _se3_to_rot6d(rw),
+                _se3_to_rot6d(tp),
             ],
             dtype=np.float32,
         )
@@ -423,6 +443,17 @@ def main() -> None:
         action="store_true",
         help="Wipe --output-path before writing.",
     )
+    parser.add_argument(
+        "--fk-smooth-sigma",
+        type=float,
+        default=1.5,
+        help=(
+            "Gaussian smoothing sigma (in frames) applied to joint angles before FK. "
+            "Reduces wrist orientation noise amplified by the 18 cm local offset into "
+            "VR position jitter. Applied only to the FK inputs — observation.state and "
+            "action.wbc always use the raw unsmoothed joint angles. Set to 0 to disable."
+        ),
+    )
     args = parser.parse_args()
 
     pkl_files = _list_pkls(args.pkl_root, args.recursive)
@@ -513,6 +544,7 @@ def main() -> None:
                 fps=args.fps,
                 rollout_index=i,
                 max_frames=max_frames,
+                fk_smooth_sigma=args.fk_smooth_sigma,
             )
             total_frames += written
         except Exception as exc:  # noqa: BLE001
