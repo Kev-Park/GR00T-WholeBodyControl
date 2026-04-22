@@ -45,7 +45,7 @@ from gear_sonic.utils.data_collection.transforms import (
     quat_to_rot6d,
 )
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 
 # G1 27-DOF joint names — order matches the 'joints' tensor column order in pkl files
 # produced by refine_motions_al.py.
