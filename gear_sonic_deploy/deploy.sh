@@ -315,6 +315,10 @@ while [[ $# -gt 0 ]]; do
             ZMQ_HOST="$2"
             shift 2
             ;;
+        --enable-motion-recording)
+            ENABLE_MOTION_RECORDING=true
+            shift
+            ;;
         sim|real)
             INTERFACE_MODE="$1"
             shift
@@ -384,6 +388,11 @@ EXTRA_ARGS=""
 if [[ "$ENV_TYPE" == "sim" ]]; then
     EXTRA_ARGS="--disable-crc-check"
     echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
+    echo ""
+fi
+if [[ "${ENABLE_MOTION_RECORDING:-false}" == "true" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --enable-motion-recording"
+    echo -e "${YELLOW}📋 Motion recording enabled — outputs to reference/recorded_motion/${NC}"
     echo ""
 fi
 
