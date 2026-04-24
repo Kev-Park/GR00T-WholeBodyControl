@@ -55,6 +55,7 @@ class DefaultEnv:
         if not camera_configs and offscreen and enable_image_publish:
             self.camera_configs = {
                 "ego_view": {"height": 480, "width": 640, "mjcf_name": "head_camera"},
+                "third_person": {"height": 480, "width": 640, "mjcf_name": "third_person"},
             }
 
         self.reward_lock = Lock()
