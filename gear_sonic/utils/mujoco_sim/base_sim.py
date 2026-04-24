@@ -61,6 +61,7 @@ class DefaultEnv:
         self.reward_lock = Lock()
         self.unitree_bridge = None
         self.onscreen = onscreen
+        self.elastic_band = None
 
         self.init_scene()
         self.last_reward = 0
