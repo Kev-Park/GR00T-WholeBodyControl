@@ -211,6 +211,7 @@ show_usage() {
     echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
     echo "  --output-type TYPE      Set the output type (default: ros2)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
+    echo "  --record-input-file PATH  Log processed planner inputs (mode, dir, speed, height) to CSV"
     echo ""
     echo "Interface modes:"
     echo "  sim              Use loopback interface for simulation (MuJoCo)"
@@ -251,6 +252,7 @@ MOTION_DATA="$MOTION_DATA_DEFAULT"
 INPUT_TYPE="$INPUT_TYPE_DEFAULT"
 OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
 ZMQ_HOST="$ZMQ_HOST_DEFAULT"
+RECORD_INPUT_FILE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -313,6 +315,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ZMQ_HOST="$2"
+            shift 2
+            ;;
+        --record-input-file)
+            if [[ -z "$2" ]]; then
+                echo -e "${RED}Error: --record-input-file requires a path argument${NC}" >&2
+                exit 1
+            fi
+            RECORD_INPUT_FILE="$2"
             shift 2
             ;;
         --enable-motion-recording)
@@ -393,6 +403,11 @@ fi
 if [[ "${ENABLE_MOTION_RECORDING:-false}" == "true" ]]; then
     EXTRA_ARGS="$EXTRA_ARGS --enable-motion-recording"
     echo -e "${YELLOW}📋 Motion recording enabled — outputs to reference/recorded_motion/${NC}"
+    echo ""
+fi
+if [[ -n "$RECORD_INPUT_FILE" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --record-input-file $RECORD_INPUT_FILE"
+    echo -e "${YELLOW}📋 Recording planner inputs to: $RECORD_INPUT_FILE${NC}"
     echo ""
 fi
 
