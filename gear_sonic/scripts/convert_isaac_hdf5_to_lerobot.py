@@ -295,12 +295,19 @@ def convert_one_rollout(
     root_quat_wxyz = raw["root_quat_w"][:n_frames].astype(np.float64)
 
     # 3D root velocity via central differences (world frame, MuJoCo Z-up).
-    planner_movement_all = np.gradient(root_pos, step_dt, axis=0).astype(np.float32)
+    _vel_all = np.gradient(root_pos, step_dt, axis=0).astype(np.float32)
 
-    # Horizontal speed magnitude.
+    # Horizontal speed magnitude (derived from velocity, before normalization).
     planner_speed_all = np.linalg.norm(
-        planner_movement_all[:, :2], axis=1, keepdims=True
+        _vel_all[:, :2], axis=1, keepdims=True
     ).astype(np.float32)
+
+    # Horizontal unit direction vector: Z always 0, zero for IDLE frames.
+    # Matches C++ movement_direction semantics (unit vector, not velocity).
+    _horiz_norm = np.linalg.norm(_vel_all[:, :2], axis=1, keepdims=True)
+    planner_movement_all = np.zeros((n_frames, 3), dtype=np.float32)
+    _moving_mask = _horiz_norm.reshape(-1) > 0.05
+    planner_movement_all[_moving_mask, :2] = _vel_all[_moving_mask, :2] / _horiz_norm[_moving_mask]
 
     # Forward unit vector: world-frame direction the torso faces, derived by
     # rotating [1, 0, 0] (body forward) by the root quaternion.
@@ -317,8 +324,9 @@ def convert_one_rollout(
         R.from_quat(root_quat_xyzw).apply(np.array([1.0, 0.0, 0.0])).astype(np.float32)
     )
 
-    # Per-frame base height (not episode mean — real locomotion may vary z).
-    planner_height_all = root_pos[:, 2:3].astype(np.float32)
+    # Height sentinel: -1.0 means "use mode default" for all standard modes.
+    # From localmotion_kplanner.hpp: height=-1 for IDLE/SLOW_WALK/WALK/RUN (all pick-task modes).
+    planner_height_all = np.full((n_frames, 1), -1.0, dtype=np.float32)
 
     # Mode from horizontal speed: 0=IDLE, 1=SLOW_WALK, 2=WALK, 3=RUN.
     def _speed_to_mode(s: float) -> int:
