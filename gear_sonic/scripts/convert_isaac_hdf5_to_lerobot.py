@@ -167,6 +167,14 @@ def _read_v2_hdf5(path: Path) -> dict[str, Any]:
         root_pos_w = obs_grp["robot0_root_pos_w"][...].astype(np.float64)
         root_quat_w = obs_grp["robot0_root_quat_w"][...].astype(np.float64)
         ego_view = obs_grp["ego_view_image"][...]
+        object_pos_w = (
+            obs_grp["object_pos"][...].astype(np.float64)
+            if "object_pos" in obs_grp else None
+        )
+        object_quat_w = (
+            obs_grp["object_quat"][...].astype(np.float64)
+            if "object_quat" in obs_grp else None
+        )
 
         left_wrist = teleop_grp["left_wrist"][...].astype(np.float64)
         right_wrist = teleop_grp["right_wrist"][...].astype(np.float64)
@@ -200,6 +208,8 @@ def _read_v2_hdf5(path: Path) -> dict[str, Any]:
         "finger_left_names": finger_left_names,
         "finger_right_names": finger_right_names,
         "step_dt": step_dt,
+        "object_pos_w": object_pos_w,
+        "object_quat_w": object_quat_w,
     }
 
 
@@ -346,6 +356,17 @@ def convert_one_rollout(
         dtype=np.int32,
     )
 
+    # Object pose arrays — None when the HDF5 predates object state recording.
+    _obj_pos_src = raw.get("object_pos_w")
+    _obj_quat_src = raw.get("object_quat_w")
+    _has_object = _obj_pos_src is not None and _obj_quat_src is not None
+    if _has_object:
+        object_pos_all  = _obj_pos_src[:n_frames].astype(np.float32)
+        object_quat_all = _obj_quat_src[:n_frames].astype(np.float32)
+    else:
+        object_pos_all  = np.zeros((n_frames, 3), dtype=np.float32)
+        object_quat_all = np.tile(np.array([1., 0., 0., 0.], dtype=np.float32), (n_frames, 1))
+
     stream_mode = np.array([5], dtype=np.int32)
 
     written = 0
@@ -423,6 +444,8 @@ def convert_one_rollout(
             "teleop.planner_speed": planner_speed_all[i].copy(),
             "teleop.planner_height": planner_height_all[i].copy(),
             "teleop.root_pos_w": root_pos[i].astype(np.float32),
+            "teleop.object_pos_w": object_pos_all[i].copy(),
+            "teleop.object_quat_w": object_quat_all[i].copy(),
             "teleop.vr_3pt_position": vr_3pt_position,
             "teleop.vr_3pt_orientation": vr_3pt_orientation,
         }
