@@ -348,11 +348,6 @@ def get_features_sonic_vla(robot_model: RobotModel) -> dict:
             "shape": (1,),
             "names": ["height"],
         },
-        "teleop.root_pos_w": {
-            "dtype": "float32",
-            "shape": (3,),
-            "names": ["root_x", "root_y", "root_z"],
-        },
         "teleop.object_pos_w": {
             "dtype": "float32",
             "shape": (3,),
