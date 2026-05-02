@@ -298,15 +298,17 @@ def convert_one_rollout(
     _vel_all = np.gradient(root_pos, step_dt, axis=0).astype(np.float32)
 
     # Horizontal speed magnitude (derived from velocity, before normalization).
-    planner_speed_all = np.linalg.norm(
-        _vel_all[:, :2], axis=1, keepdims=True
-    ).astype(np.float32)
+    # Zeroed below the IDLE threshold (0.1 m/s) so target_vel=0 for IDLE frames —
+    # passing a small positive target_vel with mode=IDLE is incoherent.
+    _raw_speed = np.linalg.norm(_vel_all[:, :2], axis=1, keepdims=True).astype(np.float32)
+    planner_speed_all = np.where(_raw_speed >= 0.1, _raw_speed, 0.0).astype(np.float32)
 
-    # Horizontal unit direction vector: Z always 0, zero for IDLE frames.
-    # Matches C++ movement_direction semantics (unit vector, not velocity).
+    # Horizontal unit direction vector: Z always 0, zero for IDLE frames (speed < 0.1 m/s).
+    # Threshold aligned with the IDLE mode boundary so direction is valid throughout
+    # SLOW_WALK/WALK/RUN and zeroes out exactly when mode switches to IDLE.
     _horiz_norm = np.linalg.norm(_vel_all[:, :2], axis=1, keepdims=True)
     planner_movement_all = np.zeros((n_frames, 3), dtype=np.float32)
-    _moving_mask = _horiz_norm.reshape(-1) > 0.05
+    _moving_mask = _horiz_norm.reshape(-1) >= 0.1
     planner_movement_all[_moving_mask, :2] = _vel_all[_moving_mask, :2] / _horiz_norm[_moving_mask]
 
     # Forward unit vector: world-frame direction the torso faces, derived by
@@ -420,6 +422,7 @@ def convert_one_rollout(
             "teleop.planner_facing": planner_facing_all[i].copy(),
             "teleop.planner_speed": planner_speed_all[i].copy(),
             "teleop.planner_height": planner_height_all[i].copy(),
+            "teleop.root_pos_w": root_pos[i].astype(np.float32),
             "teleop.vr_3pt_position": vr_3pt_position,
             "teleop.vr_3pt_orientation": vr_3pt_orientation,
         }
