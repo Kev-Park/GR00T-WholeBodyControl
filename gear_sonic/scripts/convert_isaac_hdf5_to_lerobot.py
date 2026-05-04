@@ -443,6 +443,7 @@ def convert_one_rollout(
             "teleop.planner_facing": planner_facing_all[i].copy(),
             "teleop.planner_speed": planner_speed_all[i].copy(),
             "teleop.planner_height": planner_height_all[i].copy(),
+            "teleop.root_pos_w": root_pos[i].astype(np.float32),
             "teleop.object_pos_w": object_pos_all[i].copy(),
             "teleop.object_quat_w": object_quat_all[i].copy(),
             "teleop.vr_3pt_position": vr_3pt_position,
