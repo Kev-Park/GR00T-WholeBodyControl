@@ -313,14 +313,6 @@ def convert_one_rollout(
     _raw_speed = np.linalg.norm(_vel_all[:, :2], axis=1, keepdims=True).astype(np.float32)
     planner_speed_all = np.where(_raw_speed >= 0.1, _raw_speed, 0.0).astype(np.float32)
 
-    # Horizontal unit direction vector: Z always 0, zero for IDLE frames (speed < 0.1 m/s).
-    # Threshold aligned with the IDLE mode boundary so direction is valid throughout
-    # SLOW_WALK/WALK/RUN and zeroes out exactly when mode switches to IDLE.
-    _horiz_norm = np.linalg.norm(_vel_all[:, :2], axis=1, keepdims=True)
-    planner_movement_all = np.zeros((n_frames, 3), dtype=np.float32)
-    _moving_mask = _horiz_norm.reshape(-1) >= 0.1
-    planner_movement_all[_moving_mask, :2] = _vel_all[_moving_mask, :2] / _horiz_norm[_moving_mask]
-
     # Forward unit vector: world-frame direction the torso faces, derived by
     # rotating [1, 0, 0] (body forward) by the root quaternion.
     root_quat_xyzw = np.stack(
@@ -335,6 +327,18 @@ def convert_one_rollout(
     planner_facing_all = (
         R.from_quat(root_quat_xyzw).apply(np.array([1.0, 0.0, 0.0])).astype(np.float32)
     )
+
+    # Movement direction = facing direction (body forward, Z zeroed and renormalized).
+    # The kinematic planner only generates forward locomotion — it cannot strafe.
+    # Deriving movement from root velocity would capture physics drift and produce a
+    # direction the planner can't act on.  Using facing ensures both inputs are
+    # self-consistent and the planner walks in the direction the body was oriented.
+    _moving_mask = _raw_speed.reshape(-1) >= 0.1
+    _facing_xy = planner_facing_all[:, :2].copy()
+    _facing_xy_norm = np.linalg.norm(_facing_xy, axis=1, keepdims=True)
+    _facing_xy_unit = np.where(_facing_xy_norm > 1e-6, _facing_xy / _facing_xy_norm, np.array([[1.0, 0.0]]))
+    planner_movement_all = np.zeros((n_frames, 3), dtype=np.float32)
+    planner_movement_all[_moving_mask, :2] = _facing_xy_unit[_moving_mask]
 
     # Height sentinel: -1.0 means "use mode default" for all standard modes.
     # From localmotion_kplanner.hpp: height=-1 for IDLE/SLOW_WALK/WALK/RUN (all pick-task modes).
