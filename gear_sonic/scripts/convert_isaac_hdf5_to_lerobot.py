@@ -509,14 +509,16 @@ def convert_one_rollout(
         }
 
         # Auxiliary planner-bypass column. Layout: [root_pos(3), root_quat_wxyz(4),
-        # joints_in_gear_sonic_order(29)] = 36 floats per frame. Eval and the offline
+        # joints_in_gear_sonic_order(num_joints)] floats per frame. Eval and the offline
         # motion-token populator read this to feed the encoder's lower-body lookahead
         # without invoking planner_sonic.onnx. The populator deletes this column after
         # writing action.motion_token, so the final dataset preserves SONIC schema.
         if ref_qpos_all is not None:
             frame_data["motion.reference_qpos"] = ref_qpos_all[i]
         else:
-            frame_data["motion.reference_qpos"] = np.zeros(36, dtype=np.float32)
+            frame_data["motion.reference_qpos"] = np.zeros(
+                7 + len(robot_model.joint_names), dtype=np.float32
+            )
 
         exporter.add_frame(frame_data)
         written += 1
@@ -636,15 +638,19 @@ def main() -> None:
 
     features = get_features_sonic_vla(robot_model)
     # Auxiliary column carrying the motion-library kinematic reference per frame.
-    # Layout: [root_pos(3), root_quat_wxyz(4), joints_in_gear_sonic_order(29)] = 36 floats.
-    # NOT part of the official SONIC schema — `parquet_populate.py` deletes this column
-    # after consuming it to populate action.motion_token, restoring strict SONIC layout.
+    # Layout: [root_pos(3), root_quat_wxyz(4), joints_in_gear_sonic_order(num_joints)].
+    # num_joints matches the full robot_model joint count (body + fingers) so the slice
+    # convention is identical to observation.state — eval reads [7:7+29] for body and
+    # ignores the finger tail. NOT part of the official SONIC schema —
+    # `parquet_populate.py` deletes this column after consuming it to populate
+    # action.motion_token, restoring strict SONIC layout.
+    _ref_qpos_num_joints = len(robot_model.joint_names)
     features["motion.reference_qpos"] = {
         "dtype": "float32",
-        "shape": (36,),
+        "shape": (7 + _ref_qpos_num_joints,),
         "names": ["root_x", "root_y", "root_z",
                   "root_qw", "root_qx", "root_qy", "root_qz"]
-                 + [f"joint_{i}" for i in range(len(robot_model.joint_names))],
+                 + [f"joint_{i}" for i in range(_ref_qpos_num_joints)],
     }
     modality_config = get_modality_config_sonic_vla(robot_model)
 
