@@ -193,6 +193,23 @@ def _read_v2_hdf5(path: Path) -> dict[str, Any]:
 
         step_dt = float(teleop_grp.attrs.get("step_dt", 0.0))
 
+        # Optional reference-motion fields (motion-tracking tasks only). Used to populate
+        # the auxiliary `motion.reference_qpos` parquet column, which lets eval and
+        # offline tokenization bypass planner_sonic.onnx and feed the encoder's
+        # lower-body lookahead from the kinematic intent the WBC was actually tracking.
+        ref_root_pos_w = (
+            obs_grp["ref_root_pos_w"][...].astype(np.float64)
+            if "ref_root_pos_w" in obs_grp else None
+        )
+        ref_root_quat_w = (
+            obs_grp["ref_root_quat_w"][...].astype(np.float64)
+            if "ref_root_quat_w" in obs_grp else None
+        )
+        ref_dof_pos = (
+            obs_grp["ref_dof_pos"][...].astype(np.float64)
+            if "ref_dof_pos" in obs_grp else None
+        )
+
     return {
         "env_args": env_args,
         "joint_pos": joint_pos,
@@ -210,6 +227,9 @@ def _read_v2_hdf5(path: Path) -> dict[str, Any]:
         "step_dt": step_dt,
         "object_pos_w": object_pos_w,
         "object_quat_w": object_quat_w,
+        "ref_root_pos_w": ref_root_pos_w,
+        "ref_root_quat_w": ref_root_quat_w,
+        "ref_dof_pos": ref_dof_pos,
     }
 
 
@@ -283,6 +303,40 @@ def convert_one_rollout(
     )
 
     q_gs_all = _permute_with_zero_fill(raw["joint_pos"], body_perm)
+
+    # Build reference-motion → gear_sonic permutation. The motion library typically
+    # exposes 27 DoFs (no waist_roll/pitch); use name-based mapping with zero-fill so
+    # the resulting 29-DoF vector aligns with observation.state.
+    ref_qpos_all: np.ndarray | None = None
+    if (
+        raw.get("ref_root_pos_w") is not None
+        and raw.get("ref_root_quat_w") is not None
+        and raw.get("ref_dof_pos") is not None
+        and raw["env_args"].get("ref_joint_names")
+    ):
+        ref_joint_names = list(raw["env_args"]["ref_joint_names"])
+        ref_perm, ref_missing = _build_joint_permutation(
+            ref_joint_names, robot_model.joint_names
+        )
+        ref_dof_gs = _permute_with_zero_fill(raw["ref_dof_pos"], ref_perm)  # (T, 29) gear_sonic order
+        ref_qpos_all = np.concatenate(
+            [
+                raw["ref_root_pos_w"].astype(np.float32),
+                raw["ref_root_quat_w"].astype(np.float32),
+                ref_dof_gs.astype(np.float32),
+            ],
+            axis=1,
+        )  # (T, 36) — [root_pos(3), root_quat_wxyz(4), joints_sonic_order(29)]
+        if ref_missing and rollout_index == 0:
+            print(
+                f"[info] reference motion: {len(ref_missing)} gear_sonic joints absent "
+                f"from motion_lib URDF — zero-filled in motion.reference_qpos: {ref_missing}"
+            )
+    elif rollout_index == 0:
+        print(
+            "[info] no reference-motion fields in HDF5 — motion.reference_qpos column "
+            "will be zero-filled (no planner-bypass available downstream)."
+        )
 
     # Frame zero init base quat for the whole episode.
     init_base_quat = raw["root_quat_w"][0].astype(np.float64).copy()
@@ -454,6 +508,16 @@ def convert_one_rollout(
             "teleop.vr_3pt_orientation": vr_3pt_orientation,
         }
 
+        # Auxiliary planner-bypass column. Layout: [root_pos(3), root_quat_wxyz(4),
+        # joints_in_gear_sonic_order(29)] = 36 floats per frame. Eval and the offline
+        # motion-token populator read this to feed the encoder's lower-body lookahead
+        # without invoking planner_sonic.onnx. The populator deletes this column after
+        # writing action.motion_token, so the final dataset preserves SONIC schema.
+        if ref_qpos_all is not None:
+            frame_data["motion.reference_qpos"] = ref_qpos_all[i]
+        else:
+            frame_data["motion.reference_qpos"] = np.zeros(36, dtype=np.float32)
+
         exporter.add_frame(frame_data)
         written += 1
 
@@ -571,6 +635,17 @@ def main() -> None:
     )
 
     features = get_features_sonic_vla(robot_model)
+    # Auxiliary column carrying the motion-library kinematic reference per frame.
+    # Layout: [root_pos(3), root_quat_wxyz(4), joints_in_gear_sonic_order(29)] = 36 floats.
+    # NOT part of the official SONIC schema — `parquet_populate.py` deletes this column
+    # after consuming it to populate action.motion_token, restoring strict SONIC layout.
+    features["motion.reference_qpos"] = {
+        "dtype": "float32",
+        "shape": (36,),
+        "names": ["root_x", "root_y", "root_z",
+                  "root_qw", "root_qx", "root_qy", "root_qz"]
+                 + [f"joint_{i}" for i in range(len(robot_model.joint_names))],
+    }
     modality_config = get_modality_config_sonic_vla(robot_model)
 
     script_config = {
