@@ -78,6 +78,20 @@ Use `--dataset-name` to append multiple sessions into the same dataset, or merge
 sessions afterwards with `process_dataset.py`.
 ```
 
+### Post-Process Before Fine-tuning
+
+After collection, run the processing script to remove discarded episodes
+(flagged via `x` key during recording) and clean stale SMPL frames:
+
+```bash
+source .venv_data_collection/bin/activate
+python gear_sonic/scripts/process_dataset.py \
+    --dataset-path outputs/2026-04-03-14-30-00-G1-robot01 \
+    --output-path outputs/my_task_cleaned
+```
+
+This ensures only successful demonstrations are used for fine-tuning.
+
 ## Step 2: Fine-tuning with Isaac-GR00T
 
 Fine-tune the GR00T N1.7 base model on your collected dataset using the

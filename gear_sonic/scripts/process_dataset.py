@@ -1,9 +1,10 @@
 """
 Post-process a LeRobot dataset recorded by the data exporter.
 
-Removes stale SMPL frames (all-zero teleop.smpl_pose and frozen lead-in
-frames that precede them) which occur during teleop pauses or ZMQ frame
-drops.  Can also merge multiple recording sessions into a single dataset.
+Removes discarded episodes (flagged during collection) and stale SMPL frames
+(all-zero teleop.smpl_pose and frozen lead-in frames that precede them) which
+occur during teleop pauses or ZMQ frame drops.  Can also merge multiple
+recording sessions into a single dataset.
 
 The script operates directly on the LeRobot v2.1 on-disk format
 (parquet + mp4) without any external training framework dependencies.
@@ -34,6 +35,12 @@ Usage:
         --dataset-path outputs/session1 outputs/session2 \\
         --output-path outputs/merged \\
         --no-remove-stale-smpl
+
+    # Remove discarded episodes (flagged during collection via 'x' key)
+    python gear_sonic/scripts/process_dataset.py \\
+        --dataset-path outputs/my_dataset \\
+        --output-path outputs/my_dataset_cleaned \\
+        --remove-discarded
 """
 
 from dataclasses import dataclass, field
@@ -235,6 +242,7 @@ def validate_script_configs(dataset_paths: list[Path]) -> dict | None:
 def process_single_dataset(
     dataset_path: Path,
     remove_stale_smpl: bool,
+    remove_discarded: bool = False,
     episode_index_offset: int = 0,
 ) -> dict:
     """Process one dataset: optionally clean stale SMPL frames.
@@ -246,6 +254,8 @@ def process_single_dataset(
     episodes_meta = load_episodes_meta(dataset_path)
     fps = info.get("fps", 50)
 
+    discarded_indices = set(info.get("discarded_episode_indices", [])) if remove_discarded else set()
+
     stats = {
         "total_episodes": len(episodes_meta),
         "episodes_with_stale": 0,
@@ -254,11 +264,18 @@ def process_single_dataset(
         "zero_frames": 0,
         "frozen_leadin_frames": 0,
         "episodes_dropped": 0,
+        "episodes_discarded": 0,
     }
     processed_episodes = []
 
     for ep_meta in episodes_meta:
         ep_idx = ep_meta["episode_index"]
+
+        if ep_idx in discarded_indices:
+            stats["episodes_discarded"] += 1
+            print(f"  Episode {ep_idx}: discarded during collection — removing")
+            continue
+
         parquet_path = get_parquet_path(dataset_path, info, ep_idx)
         video_paths = get_video_paths(dataset_path, info, ep_idx)
 
@@ -388,6 +405,7 @@ def write_output_dataset(
 
     info["total_episodes"] = len(all_episodes)
     info["total_frames"] = total_frames
+    info.pop("discarded_episode_indices", None)
 
     with open(meta_dir / "info.json", "w", encoding="utf-8") as f:
         json.dump(info, f, indent=4)
@@ -438,6 +456,10 @@ class ProcessDatasetConfig:
     """Remove frames where teleop.smpl_pose is all zeros (stale/dropped
     SMPL data) and frozen lead-in frames that precede them."""
 
+    remove_discarded: bool = True
+    """Remove episodes that were flagged as discarded during data collection
+    (stored in meta/info.json under discarded_episode_indices)."""
+
 
 def main(cfg: ProcessDatasetConfig):
     dataset_paths = [Path(p) for p in cfg.dataset_path]
@@ -479,6 +501,7 @@ def main(cfg: ProcessDatasetConfig):
         print(f"    - {ds}")
     print(f"  Output:               {output_path}{'  (in-place)' if in_place else ''}")
     print(f"  Remove stale SMPL:    {cfg.remove_stale_smpl}")
+    print(f"  Remove discarded:     {cfg.remove_discarded}")
     print("=" * 70)
 
     # Validate script configs match across all datasets
@@ -510,6 +533,7 @@ def main(cfg: ProcessDatasetConfig):
         "zero_frames": 0,
         "frozen_leadin_frames": 0,
         "episodes_dropped": 0,
+        "episodes_discarded": 0,
     }
     reference_info = None
 
@@ -518,6 +542,7 @@ def main(cfg: ProcessDatasetConfig):
         stats, episodes, info = process_single_dataset(
             ds_path,
             remove_stale_smpl=cfg.remove_stale_smpl,
+            remove_discarded=cfg.remove_discarded,
             episode_index_offset=len(all_episodes),
         )
 
@@ -538,6 +563,18 @@ def main(cfg: ProcessDatasetConfig):
         print(f"\nRewriting dataset in-place at {output_path}...")
         ds_info = load_info(output_path)
         fps = ds_info.get("fps", 50)
+
+        # Delete files for discarded episodes
+        if cfg.remove_discarded:
+            discarded_indices = set(ds_info.get("discarded_episode_indices", []))
+            for ep_idx in discarded_indices:
+                parquet_path = get_parquet_path(output_path, ds_info, ep_idx)
+                if parquet_path.exists():
+                    parquet_path.unlink()
+                video_paths = get_video_paths(output_path, ds_info, ep_idx)
+                for _vkey, vpath in video_paths.items():
+                    if vpath.exists():
+                        vpath.unlink()
 
         for ep in all_episodes:
             ep_idx = ep["episode_meta"]["episode_index"]
@@ -563,6 +600,8 @@ def main(cfg: ProcessDatasetConfig):
 
         ds_info["total_frames"] = sum(len(ep["df"]) for ep in all_episodes)
         ds_info["total_episodes"] = len(all_episodes)
+        if cfg.remove_discarded:
+            ds_info.pop("discarded_episode_indices", None)
         with open(output_path / "meta" / "info.json", "w", encoding="utf-8") as f:
             json.dump(ds_info, f, indent=4)
     else:
@@ -574,13 +613,13 @@ def main(cfg: ProcessDatasetConfig):
 
     # Print summary
     kept = total_stats["total_frames"] - total_stats["frames_removed"]
-    kept_episodes = total_stats["total_episodes"] - total_stats["episodes_dropped"]
+    kept_episodes = total_stats["total_episodes"] - total_stats["episodes_dropped"] - total_stats["episodes_discarded"]
 
     print("\n" + "=" * 70)
     print("  Processing complete!")
     print("=" * 70)
     print(f"  Episodes:  {kept_episodes} kept / {total_stats['total_episodes']} total"
-          f"  ({total_stats['episodes_dropped']} dropped)")
+          f"  ({total_stats['episodes_dropped']} dropped, {total_stats['episodes_discarded']} discarded)")
     print(f"  Frames:    {kept} kept / {total_stats['total_frames']} total"
           f"  ({total_stats['frames_removed']} removed)")
     if total_stats["frames_removed"] > 0:

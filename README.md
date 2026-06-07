@@ -209,8 +209,8 @@ For the full guide including multi-node training, evaluation, ONNX export, and S
 - [x] Setup documentation
 - [x] Open source teleoperation stack and demonstration scripts
 - [x] Release training scripts and recipes for motion imitation and fine-tuning
-- [ ] Open source large-scale data collection workflows and fine-tuning VLA scripts. 
-- [ ] Publish additional preprocessed large-scale human motion datasets
+- [x] Open source large-scale data collection workflows and fine-tuning VLA scripts. 
+- [x] Publish additional preprocessed large-scale human motion datasets
 
 
 

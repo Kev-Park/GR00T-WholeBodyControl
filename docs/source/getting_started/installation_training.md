@@ -4,7 +4,7 @@ This guide walks through setting up the SONIC training environment for whole-bod
 
 ## Prerequisites
 
-- **GPU**: NVIDIA GPU with CUDA 12.x (L40, A100, or H100 recommended)
+- **GPU**: NVIDIA GPU with CUDA 12.x (L40 recommended)
 - **OS**: Ubuntu 22.04+
 - **Python**: 3.11 (required by Isaac Lab; sim/teleop/deploy scripts work on 3.10+)
 - **Isaac Lab**: 2.3+ (required for simulation environments)

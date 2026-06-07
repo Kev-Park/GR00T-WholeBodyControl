@@ -14,7 +14,7 @@ running PolicyServer.
 Keyboard commands (received via ZMQ from the standalone keyboard publisher):
   p  -> pause / resume the policy loop
   k  -> start / stop the C++ control loop
-  i  -> send initial pose and switch to POSE mode
+  i  -> blend smoothly to initial pose (or snap if no prior token) and switch to POSE mode
   t  -> change prompt at runtime (publisher sends ``prompt:<text>``)
   [  -> toggle left hand open/closed for initial pose
   ]  -> toggle right hand open/closed for initial pose
@@ -113,6 +113,12 @@ class InferenceConfig:
     # Prompt / eval
     prompt: str = "demo"
     """The language prompt for the VLA policy."""
+
+    # Initial pose
+    initial_pose_blend_duration: float = 1.0
+    """Duration (seconds) for smooth interpolation to initial pose. The robot
+    blends from its current motion token to the initial pose token over this
+    period. Set to 0 to snap instantly (no blend)."""
 
     # Debug
     verbose_timing: bool = False
@@ -431,6 +437,63 @@ def main(config: InferenceConfig):
         time.sleep(1.0)
         print("Initial pose done.")
 
+    def blend_to_initial_pose(duration_s: float) -> bool:
+        """Smoothly interpolate from the last sent motion token to the initial pose.
+
+        Linearly blends over ``duration_s`` seconds at the action publish rate,
+        sending intermediate tokens each loop iteration. Returns True if blend
+        was performed, False if skipped (no previous token available).
+        """
+        nonlocal last_sent_motion_token
+        if last_sent_motion_token is None:
+            print("No previous motion token — snapping to initial pose instead.")
+            publish_initial_pose()
+            return False
+
+        start_token = last_sent_motion_token.copy()
+        target_token = LATENT_INITIAL_MOTION_TOKEN.copy()
+        num_steps = max(1, round(config.action_publish_rate * duration_s))
+        step_period = 1.0 / config.action_publish_rate
+
+        left_hand = (
+            _compute_closed_hand_joints("L")
+            if initial_pose_left_hand_closed
+            else np.zeros(7, dtype=np.float32)
+        )
+        right_hand = (
+            _compute_closed_hand_joints("R")
+            if initial_pose_right_hand_closed
+            else np.zeros(7, dtype=np.float32)
+        )
+
+        print(
+            f"Blending to initial pose over {duration_s:.2f}s "
+            f"({num_steps} steps at {config.action_publish_rate} Hz)"
+        )
+
+        for step in range(num_steps):
+            t_step_start = time.monotonic()
+            alpha = (step + 1) / num_steps
+            blended_token = ((1.0 - alpha) * start_token + alpha * target_token).astype(
+                np.float32
+            )
+            zmq_message = pack_latent_action_message(
+                motion_token=blended_token,
+                frame_index=np.array([0], dtype=np.int64),
+                left_hand_joints=left_hand,
+                right_hand_joints=right_hand,
+            )
+            zmq_socket.send(zmq_message)
+            last_sent_motion_token = blended_token.copy()
+
+            elapsed = time.monotonic() - t_step_start
+            remaining = step_period - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+
+        print_green("Initial pose blend complete.")
+        return True
+
     def send_cpp_control_command(start: bool, planner: bool = False):
         """Send C++ control loop start/stop commands via ZMQ."""
         nonlocal cpp_loop_running, cpp_mode
@@ -459,6 +522,7 @@ def main(config: InferenceConfig):
     inference_interval = 1.0 / config.rate
 
     zmq_frame_counter = 0
+    last_sent_motion_token: np.ndarray | None = None
 
     PROMPT_MSG_PREFIX = "prompt:"
 
@@ -466,7 +530,7 @@ def main(config: InferenceConfig):
         nonlocal pause_loop, cpp_loop_running, cpp_mode
         nonlocal initial_pose_left_hand_closed, initial_pose_right_hand_closed
         nonlocal cached_action_chunk, action_chunk_index, last_inference_time
-        nonlocal zmq_frame_counter
+        nonlocal zmq_frame_counter, last_sent_motion_token
 
         key = keyboard_listener.read_msg()
         if key is None:
@@ -489,13 +553,6 @@ def main(config: InferenceConfig):
         elif key == "f":
             print("Keyboard: 'f' (stop recording failure -- handled by data exporter)")
         elif key == "i":
-            print("Moving to initial pose")
-            zmq_frame_counter = 0
-            print("Reset ZMQ frame counter")
-            publish_initial_pose()
-            cached_action_chunk = None
-            action_chunk_index = 0
-            print("Cleared cached action chunk")
             if cpp_loop_running and cpp_mode == "PLANNER":
                 if send_cpp_control_command(start=True, planner=False):
                     print("Switched to POSE mode (from PLANNER mode)")
@@ -503,6 +560,17 @@ def main(config: InferenceConfig):
                     print("Warning: Failed to switch to POSE mode")
             elif not cpp_loop_running:
                 print("Note: C++ loop not running - press 'k' to start")
+
+            pause_loop = True
+            if config.initial_pose_blend_duration > 0 and last_sent_motion_token is not None:
+                blend_to_initial_pose(config.initial_pose_blend_duration)
+            else:
+                publish_initial_pose()
+
+            zmq_frame_counter = 0
+            cached_action_chunk = None
+            action_chunk_index = 0
+            print("Cleared cached action chunk, reset frame counter")
         elif key == "p":
             pause_loop = not pause_loop
             print(f"{'Paused' if pause_loop else 'Resumed'} policy loop")
@@ -662,6 +730,7 @@ def main(config: InferenceConfig):
                         right_hand_joints=right_hand_joints,
                     )
                     zmq_socket.send(zmq_message)
+                    last_sent_motion_token = motion_token.copy()
                     if zmq_frame_counter % 50 == 0:
                         print_green(
                             f"ZMQ: Sent latent action - "
