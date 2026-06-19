@@ -230,6 +230,14 @@ def _read_v2_hdf5(path: Path) -> dict[str, Any]:
             if "ref_dof_pos" in obs_grp else None
         )
 
+        # Executed SONIC token recorded at collection time (adapter base + learned
+        # residual, FSQ-snapped). When present, the converter writes it straight to
+        # action.motion_token — the exact VLA target — and needs no encoder.
+        recorded_motion_token = (
+            obs_grp["motion_token"][...].astype(np.float64)
+            if "motion_token" in obs_grp else None
+        )
+
     return {
         "env_args": env_args,
         "joint_pos": joint_pos,
@@ -250,6 +258,7 @@ def _read_v2_hdf5(path: Path) -> dict[str, Any]:
         "ref_root_pos_w": ref_root_pos_w,
         "ref_root_quat_w": ref_root_quat_w,
         "ref_dof_pos": ref_dof_pos,
+        "recorded_motion_token": recorded_motion_token,
     }
 
 
@@ -496,12 +505,25 @@ def convert_one_rollout(
             "will be zero-filled (no planner-bypass available downstream)."
         )
 
-    # Motion-token population (optional; requires --encoder-onnx). Computes the
-    # whole episode's tokens up front from the reference trajectory, exactly as
-    # eval_parquet_sonic.py's reference-bypass G1 mode does. Falls back to
-    # zero-fill (old behavior) when no encoder is provided or no reference exists.
+    # Motion-token population. Preference order:
+    #   1. RECORDED executed token from the HDF5 (obs/motion_token) — the exact decoder
+    #      input the adapter ran; the correct VLA target. No encoder needed.
+    #   2. Re-derive from the reference via the encoder (G1 mode) — recovers only the
+    #      un-adapted BASE token; a legacy fallback for HDF5s without a recorded token.
+    #   3. Zero-fill (no encoder, no recorded token).
     motion_tokens: np.ndarray | None = None
-    if encoder_session is not None:
+    recorded_tok = raw.get("recorded_motion_token")
+    if recorded_tok is not None:
+        if recorded_tok.ndim != 2 or recorded_tok.shape[1] != 64:
+            raise ValueError(
+                f"recorded obs/motion_token must be (N, 64); got {recorded_tok.shape}"
+            )
+        motion_tokens = recorded_tok[:n_frames].astype(np.float64)
+        if rollout_index == 0:
+            _tmax = float(np.abs(motion_tokens).max())
+            print(f"[token] using RECORDED executed token from HDF5 (obs/motion_token): "
+                  f"{motion_tokens.shape[0]} frames, |token| max={_tmax:.4f} — no encoder re-derivation.")
+    elif encoder_session is not None:
         if ref_qpos_all is not None:
             motion_tokens = _compute_episode_motion_tokens(
                 encoder_session, enc_input_name, ref_qpos_all,
@@ -716,6 +738,16 @@ def convert_one_rollout(
     return written
 
 
+def _hdf5_has_recorded_token(path: Path) -> bool:
+    """True if the HDF5 carries an executed-token column (obs/motion_token)."""
+    try:
+        with h5py.File(path, "r") as f:
+            obs = f.get(OBS_GROUP_PATH)
+            return obs is not None and "motion_token" in obs
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _list_rollouts(root: Path, recursive: bool) -> list[Path]:
     pattern = "**/*.hdf5" if recursive else "*.hdf5"
     files = sorted(root.glob(pattern))
@@ -813,12 +845,16 @@ def main() -> None:
         rollouts = rollouts[: args.rollout_limit]
     print(f"[info] found {len(rollouts)} rollout file(s)")
 
-    # Encoder for motion-token population. Defaults to the canonical release path, so
-    # tokens are populated automatically when model_encoder.onnx is present. Absent file
-    # or --zero-fill-tokens → graceful zero-fill (old behavior), never a hard crash.
+    # Token source. Preference: recorded executed token in the HDF5 (no encoder needed) >
+    # encoder re-derivation > zero-fill. We peek the first rollout to decide whether to
+    # load the encoder at all — when tokens are recorded the converter stays dependency-free.
     encoder_session = None
     enc_input_name: str | None = None
-    if args.zero_fill_tokens:
+    _has_recorded_tokens = _hdf5_has_recorded_token(rollouts[0])
+    if _has_recorded_tokens:
+        print("[token] HDF5 carries recorded executed tokens (obs/motion_token) — writing "
+              "them straight to action.motion_token; no encoder needed.")
+    elif args.zero_fill_tokens:
         print("[token] --zero-fill-tokens set → action.motion_token ZERO-FILLED (not trainable).")
     elif args.encoder_onnx is not None and args.encoder_onnx.exists():
         try:
@@ -918,12 +954,14 @@ def main() -> None:
         "joints_zero_filled_in_state": body_missing,
         "zero_filled_fields": (
             [f for f in ZERO_FILLED_FIELDS if f != "action.motion_token"]
-            if encoder_session is not None else ZERO_FILLED_FIELDS
+            if (_has_recorded_tokens or encoder_session is not None) else ZERO_FILLED_FIELDS
         ),
         "motion_token_source": (
+            "recorded executed token (obs/motion_token from collection) — exact decoder input"
+            if _has_recorded_tokens else
             "encoder model_encoder.onnx (G1 mode, reference-bypass; mirrors "
-            "eval_parquet_sonic.py reference path)"
-            if encoder_session is not None else "ZERO-FILLED (no --encoder-onnx)"
+            "eval_parquet_sonic.py reference path) — un-adapted BASE token"
+            if encoder_session is not None else "ZERO-FILLED (no recorded token, no --encoder-onnx)"
         ),
         "action_wbc_source": "robot0_joint_pos via name-based permutation",
         "notes": (
@@ -980,10 +1018,16 @@ def main() -> None:
     print(
         f"[done] wrote {total_frames} frames across {len(rollouts)} episode(s) -> {save_root}"
     )
-    if encoder_session is not None:
+    if _has_recorded_tokens:
+        print("[done] action.motion_token written from the RECORDED executed token "
+              "(obs/motion_token) — the exact adapter decoder input. This is the correct "
+              "VLA target; no encoder re-derivation was used.")
+        _remaining_zero = [f for f in ZERO_FILLED_FIELDS if f != "action.motion_token"]
+    elif encoder_session is not None:
         print("[done] action.motion_token POPULATED via the encoder (G1-mode reference "
-              "bypass). Validate against eval_parquet_sonic.py before training: a few rows' "
-              "tokens should match the eval encoder output for the same frames.")
+              "bypass). NOTE: this is the un-adapted BASE token, not the executed adapter "
+              "token — re-collect with the updated collector to record obs/motion_token if "
+              "this dataset came from a residual adapter. Validate against eval_parquet_sonic.py.")
         _remaining_zero = [f for f in ZERO_FILLED_FIELDS if f != "action.motion_token"]
     else:
         _remaining_zero = ZERO_FILLED_FIELDS
