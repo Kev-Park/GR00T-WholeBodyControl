@@ -821,7 +821,20 @@ def main() -> None:
     if args.zero_fill_tokens:
         print("[token] --zero-fill-tokens set → action.motion_token ZERO-FILLED (not trainable).")
     elif args.encoder_onnx is not None and args.encoder_onnx.exists():
-        import onnxruntime as ort  # noqa: PLC0415
+        try:
+            import onnxruntime as ort  # noqa: PLC0415
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "onnxruntime is required to populate action.motion_token but is not "
+                f"installed in this environment. Found the encoder at {args.encoder_onnx} "
+                "and would tokenize, but cannot import onnxruntime.\n"
+                "Fix one of:\n"
+                "  1. pip install onnxruntime   (CPU is fine for offline conversion; "
+                "onnxruntime-gpu optional)\n"
+                "  2. run this converter in an env that has onnxruntime\n"
+                "  3. pass --zero-fill-tokens to skip tokenization (produces an "
+                "UNTRAINABLE dataset — null tokens)"
+            ) from exc
 
         _avail = ort.get_available_providers()
         _providers = [
