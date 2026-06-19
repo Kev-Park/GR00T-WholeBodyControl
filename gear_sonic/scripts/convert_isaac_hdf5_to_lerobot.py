@@ -10,8 +10,12 @@ Run under ``.venv_data_collection`` (provisioned via
 
 Several feature slots that have no Isaac-Lab analog are zero-filled
 (see ``ZERO_FILLED_FIELDS`` and the dataset's ``meta/info.json`` script_config).
-A later revision may run ``model_encoder.onnx`` to populate
-``action.motion_token`` from the recorded teleop fields.
+
+``action.motion_token`` is the SONIC VLA's flow-matching supervision target. Pass
+``--encoder-onnx <model_encoder.onnx>`` to POPULATE it by running the encoder on the
+recorded reference motion (G1 mode, mirroring ``eval_parquet_sonic.py``'s validated
+reference-bypass path); without that flag it is zero-filled (old behavior) and a VLA
+trained on the dataset will learn to emit null tokens.
 
 Converter v2 (current): planner_{movement,speed,facing,height,mode} are
 derived per-frame from ``root_pos_w`` / ``root_quat_w`` so the VLA learns
@@ -46,6 +50,16 @@ from gear_sonic.utils.data_collection.transforms import (
 
 
 SCHEMA_VERSION = 2
+
+# Default encoder ONNX location — the canonical SONIC release path other repo scripts
+# use (download_from_hf.py writes here; WBCBenchmark eval points at the same file). Lets
+# the converter populate tokens without an explicit --encoder-onnx. Resolved relative to
+# the repo root: <GR00T-WholeBodyControl>/gear_sonic_deploy/policy/release/model_encoder.onnx
+# (this file lives at <repo>/gear_sonic/scripts/, so parents[2] is the repo root).
+_DEFAULT_ENCODER_ONNX = (
+    Path(__file__).resolve().parents[2]
+    / "gear_sonic_deploy" / "policy" / "release" / "model_encoder.onnx"
+)
 TELEOP_GROUP_PATH = "data/demo_0/teleop"
 OBS_GROUP_PATH = "data/demo_0/obs"
 DATA_GROUP_PATH = "data"
@@ -125,7 +139,13 @@ def _permute_with_zero_fill(
 
 
 def _resize_ego_view(frame: np.ndarray) -> np.ndarray:
-    """Resize 720x1280 producer ego view -> 480x640 dataset feature."""
+    """Downscale the producer ego view -> 480x640 dataset feature.
+
+    The kitchen collection env renders the ego camera at 960x1280 (4:3), so this is a uniform
+    2x INTER_AREA shrink (crisp, no aspect distortion). NOTE: a 16:9 source (e.g. 720x1280)
+    would be squished non-uniformly into 4:3 here — blurring/horizontally distorting frames —
+    so the producer camera must be 4:3 to match the EGO_VIEW (640x480) aspect.
+    """
     if frame.shape[:2] == (EGO_VIEW_HEIGHT, EGO_VIEW_WIDTH):
         return frame
     return cv2.resize(
@@ -256,6 +276,142 @@ def _wrist_joint_slot_indices(
     )
 
 
+# =========================================================================
+# Motion-token population (encoder pass).
+#
+# Mirrors the VALIDATED reference-bypass G1-mode tokenization in
+# WBCBenchmark/.../eval_parquet_sonic.py (NOT the older teleop-mode sketch in
+# PARQUET_POPULATE_PLAN.md). The encoder (model_encoder.onnx) consumes the 29-joint
+# full-body FUTURE trajectory in G1 mode (encoder_mode=0), read from the kinematic
+# reference, plus a per-frame anchor orientation, and emits the 64-D motion token
+# the SONIC VLA fine-tuning supervises against. Joint-order constants are copied
+# verbatim from vla_sonic.action_assembler / eval_parquet_sonic.py so this stays
+# byte-compatible with the eval path without a cross-repo import.
+# =========================================================================
+
+# "SONIC-IsaacLab order in MuJoCo index" (action_assembler.ISAACLAB_TO_MUJOCO): for
+# each IsaacLab/SONIC-interleaved slot, the MuJoCo-grouped index to read from.
+_ISAACLAB_TO_MUJOCO = np.array([
+    0,  6, 12,  1,  7, 13,  2,  8, 14,  3,  9, 15, 22,  4, 10,
+    16, 23,  5, 11, 17, 24, 18, 25, 19, 26, 20, 27, 21, 28,
+], dtype=np.int64)
+
+# The 29 body joints (no fingers) within gear_sonic's 43-joint layout
+# (eval_parquet_sonic.BODY_INDICES_IN_GEAR_SONIC): legs+waist+left_arm = 0..21,
+# right_arm = 29..35; skips left_hand 22-28 and right_hand 36-42.
+_BODY_INDICES_IN_GEAR_SONIC = np.concatenate(
+    [np.arange(0, 22), np.arange(29, 36)]
+).astype(np.int64)
+assert _BODY_INDICES_IN_GEAR_SONIC.shape[0] == 29
+
+# G1-mode encoder lookahead: 10 frames at 50 Hz stride-5 = 100 ms apart, 0.9 s horizon
+# (matches eval_parquet_sonic.py's default --bypass-stride-hz 50).
+_TOKEN_LOOKAHEAD_IDX = np.arange(0, 50, 5, dtype=np.int64)  # [0, 5, ..., 45]
+_TOKEN_FRAME_RATE_HZ = 50.0
+
+# Encoder obs layout (1762 dims), mirrors vla_sonic.planner_to_utm.ENCODER_LAYOUT.
+_ENC_LAYOUT = [
+    ("encoder_mode_4", 4),
+    ("motion_joint_positions_10frame_step5", 290),
+    ("motion_joint_velocities_10frame_step5", 290),
+    ("motion_root_z_position_10frame_step5", 10),
+    ("motion_root_z_position", 1),
+    ("motion_anchor_orientation", 6),
+    ("motion_anchor_orientation_10frame_step5", 60),
+    ("motion_joint_positions_lowerbody_10frame_step5", 120),
+    ("motion_joint_velocities_lowerbody_10frame_step5", 120),
+    ("vr_3point_local_target", 9),
+    ("vr_3point_local_orn_target", 12),
+    ("smpl_joints_10frame_step1", 720),
+    ("smpl_anchor_orientation_10frame_step1", 60),
+    ("motion_joint_positions_wrists_10frame_step1", 60),
+]
+_ENC_SLICES: dict[str, slice] = {}
+_cursor = 0
+for _name, _dim in _ENC_LAYOUT:
+    _ENC_SLICES[_name] = slice(_cursor, _cursor + _dim)
+    _cursor += _dim
+_ENC_TOTAL_DIM = _cursor
+assert _ENC_TOTAL_DIM == 1762, f"encoder layout mismatch: {_ENC_TOTAL_DIM}"
+
+
+def _quat_wxyz_to_xyzw(q_wxyz: np.ndarray) -> np.ndarray:
+    q = np.asarray(q_wxyz, dtype=np.float64)
+    return np.array([q[1], q[2], q[3], q[0]], dtype=np.float64)
+
+
+def _build_g1_encoder_obs(
+    body_pos_future: np.ndarray,       # (10, 29) IsaacLab-interleaved order
+    body_vel_future: np.ndarray,       # (10, 29)
+    anchor_rot6d_future: np.ndarray,   # (10, 6) row-major flatten of mat[:, :2]
+) -> np.ndarray:
+    """Assemble the (1, 1762) G1-mode (encoder_mode=0) encoder input.
+
+    Mirrors vla_sonic.planner_to_utm.build_g1_encoder_obs — only the three G1-mode
+    slots are non-zero; the encoder's all-zero mode flag selects the robot-motion
+    subnetwork that reads them.
+    """
+    buf = np.zeros(_ENC_TOTAL_DIM, dtype=np.float32)
+    # encoder_mode_4 stays [0, 0, 0, 0] → G1 mode.
+    buf[_ENC_SLICES["motion_joint_positions_10frame_step5"]] = body_pos_future.reshape(-1)
+    buf[_ENC_SLICES["motion_joint_velocities_10frame_step5"]] = body_vel_future.reshape(-1)
+    buf[_ENC_SLICES["motion_anchor_orientation_10frame_step5"]] = anchor_rot6d_future.reshape(-1)
+    return buf[None, :]
+
+
+def _compute_episode_motion_tokens(
+    encoder_session,
+    enc_input_name: str,
+    ref_qpos_all: np.ndarray,             # (N, 7 + n_joints) reference qpos, gear_sonic joint order
+    executed_root_quat_wxyz: np.ndarray,  # (N, 4) executed robot root quat per frame, wxyz
+    n_frames: int,
+) -> np.ndarray:
+    """Run the encoder per frame → (n_frames, 64) motion tokens.
+
+    Reproduces eval_parquet_sonic.py's reference-bypass G1-mode path exactly:
+      - source joints = motion.reference_qpos[:, 7:] (kinematic intent, gear_sonic order)
+      - 50 Hz stride-5 lookahead window (100 ms/frame, 0.9 s horizon)
+      - velocities by central difference at native 50 Hz, then windowed
+      - 29 body joints (BODY_INDICES_IN_GEAR_SONIC) → IsaacLab order (ISAACLAB_TO_MUJOCO)
+      - per-frame anchor rot6d = (R_executed_now)^-1 · R_reference(t+k), row-major
+        flatten of the first two matrix columns.
+    """
+    n_total = ref_qpos_all.shape[0]
+    src_pos_full = ref_qpos_all[:, 7:].astype(np.float32)        # (N, n_joints) gear_sonic order
+    if src_pos_full.shape[1] <= int(_BODY_INDICES_IN_GEAR_SONIC.max()):
+        raise ValueError(
+            f"reference_qpos carries {src_pos_full.shape[1]} joints, but the 29-body-joint "
+            f"selection needs index up to {int(_BODY_INDICES_IN_GEAR_SONIC.max())} (the full "
+            "gear_sonic 43-joint layout incl. fingers). Ensure robot_model.joint_names "
+            "includes the hands so ref_qpos_all matches eval_parquet_sonic.py's obs_state."
+        )
+    src_vel_full = np.gradient(
+        src_pos_full, 1.0 / _TOKEN_FRAME_RATE_HZ, axis=0
+    ).astype(np.float32)
+    ref_root_quat_full = ref_qpos_all[:, 3:7].astype(np.float32)  # (N, 4) wxyz (reference root)
+
+    tokens = np.zeros((n_frames, 64), dtype=np.float64)
+    for i in range(n_frames):
+        idx = np.clip(i + _TOKEN_LOOKAHEAD_IDX, 0, n_total - 1)          # (10,)
+        body_pos_mj = src_pos_full[idx][:, _BODY_INDICES_IN_GEAR_SONIC]  # (10, 29) MuJoCo order
+        body_vel_mj = src_vel_full[idx][:, _BODY_INDICES_IN_GEAR_SONIC]
+        body_pos_future = body_pos_mj[:, _ISAACLAB_TO_MUJOCO]           # (10, 29) IsaacLab order
+        body_vel_future = body_vel_mj[:, _ISAACLAB_TO_MUJOCO]
+
+        R_robot = R.from_quat(_quat_wxyz_to_xyzw(executed_root_quat_wxyz[i]))
+        ref_quat_window = ref_root_quat_full[idx]                       # (10, 4)
+        anchor_rot6d_future = np.zeros((10, 6), dtype=np.float32)
+        for k in range(10):
+            R_anchor_k = R.from_quat(_quat_wxyz_to_xyzw(ref_quat_window[k]))
+            R_rel = (R_robot.inv() * R_anchor_k).as_matrix().astype(np.float32)
+            anchor_rot6d_future[k] = R_rel[:, :2].flatten("C")
+
+        enc_obs = _build_g1_encoder_obs(body_pos_future, body_vel_future, anchor_rot6d_future)
+        out = encoder_session.run(None, {enc_input_name: enc_obs})[0]
+        tokens[i] = np.asarray(out, dtype=np.float64).reshape(-1)[:64]
+    return tokens
+
+
 def convert_one_rollout(
     hdf5_path: Path,
     exporter: Gr00tDataExporter,
@@ -270,6 +426,8 @@ def convert_one_rollout(
     expected_right_body_name: str,
     rollout_index: int,
     max_frames: int | None = None,
+    encoder_session=None,
+    enc_input_name: str | None = None,
 ) -> int:
     print(f"[rollout {rollout_index}] loading {hdf5_path.name}")
     raw = _read_v2_hdf5(hdf5_path)
@@ -337,6 +495,28 @@ def convert_one_rollout(
             "[info] no reference-motion fields in HDF5 — motion.reference_qpos column "
             "will be zero-filled (no planner-bypass available downstream)."
         )
+
+    # Motion-token population (optional; requires --encoder-onnx). Computes the
+    # whole episode's tokens up front from the reference trajectory, exactly as
+    # eval_parquet_sonic.py's reference-bypass G1 mode does. Falls back to
+    # zero-fill (old behavior) when no encoder is provided or no reference exists.
+    motion_tokens: np.ndarray | None = None
+    if encoder_session is not None:
+        if ref_qpos_all is not None:
+            motion_tokens = _compute_episode_motion_tokens(
+                encoder_session, enc_input_name, ref_qpos_all,
+                raw["root_quat_w"], n_frames,
+            )
+            if rollout_index == 0:
+                _tmax = float(np.abs(motion_tokens).max())
+                print(f"[token] populated action.motion_token via encoder (G1 mode, "
+                      f"reference source): {motion_tokens.shape[0]} frames, |token| max={_tmax:.4f}")
+                if _tmax < 1e-6:
+                    print("[token][WARN] computed tokens are ~all-zero — check the encoder ONNX "
+                          "and that motion.reference_qpos is populated (non-trivial).")
+        elif rollout_index == 0:
+            print("[token][WARN] --encoder-onnx given but this HDF5 has no reference motion "
+                  "(motion.reference_qpos) — action.motion_token stays zero-filled.")
 
     # Frame zero init base quat for the whole episode.
     init_base_quat = raw["root_quat_w"][0].astype(np.float64).copy()
@@ -485,7 +665,9 @@ def convert_one_rollout(
             "observation.cpp_rotation_offset": identity_cpp_offset.copy(),
             "observation.init_base_quat": init_base_quat.copy(),
             "teleop.delta_heading": zero_delta_heading.copy(),
-            "action.motion_token": zero_motion_token.copy(),
+            "action.motion_token": (
+                motion_tokens[i] if motion_tokens is not None else zero_motion_token.copy()
+            ),
             "teleop.smpl_joints": zero_smpl_joints.copy(),
             "teleop.smpl_pose": zero_smpl_pose.copy(),
             "teleop.body_quat_w": identity_body_quat.copy(),
@@ -606,12 +788,55 @@ def main() -> None:
         action="store_true",
         help="Wipe --output-path before writing.",
     )
+    parser.add_argument(
+        "--encoder-onnx",
+        type=Path,
+        default=_DEFAULT_ENCODER_ONNX,
+        help="Path to model_encoder.onnx used to POPULATE action.motion_token by running "
+             "the encoder on the reference motion (G1 mode, mirrors eval_parquet_sonic.py). "
+             f"Defaults to the canonical release path ({_DEFAULT_ENCODER_ONNX}), so you "
+             "normally don't pass it. If the file is absent (or --zero-fill-tokens is set) "
+             "the column is zero-filled and a VLA trained on it will emit null tokens. "
+             "Population also needs the HDF5's reference-motion fields "
+             "(ref_root_pos_w / ref_root_quat_w / ref_dof_pos).",
+    )
+    parser.add_argument(
+        "--zero-fill-tokens",
+        action="store_true",
+        help="Force action.motion_token to be zero-filled even if an encoder is available "
+             "(skip tokenization). Use only for schema-debugging; not trainable.",
+    )
     args = parser.parse_args()
 
     rollouts = _list_rollouts(args.hdf5_root, args.recursive)
     if args.rollout_limit >= 0:
         rollouts = rollouts[: args.rollout_limit]
     print(f"[info] found {len(rollouts)} rollout file(s)")
+
+    # Encoder for motion-token population. Defaults to the canonical release path, so
+    # tokens are populated automatically when model_encoder.onnx is present. Absent file
+    # or --zero-fill-tokens → graceful zero-fill (old behavior), never a hard crash.
+    encoder_session = None
+    enc_input_name: str | None = None
+    if args.zero_fill_tokens:
+        print("[token] --zero-fill-tokens set → action.motion_token ZERO-FILLED (not trainable).")
+    elif args.encoder_onnx is not None and args.encoder_onnx.exists():
+        import onnxruntime as ort  # noqa: PLC0415
+
+        _avail = ort.get_available_providers()
+        _providers = [
+            p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in _avail
+        ] or _avail
+        encoder_session = ort.InferenceSession(str(args.encoder_onnx), providers=_providers)
+        enc_input_name = encoder_session.get_inputs()[0].name
+        print(f"[token] encoder ONNX loaded: {args.encoder_onnx} "
+              f"(input '{enc_input_name}', providers={_providers}) — action.motion_token "
+              "will be POPULATED via the G1-mode reference-bypass encoder pass.")
+    else:
+        print(f"[token][WARN] encoder ONNX not found at {args.encoder_onnx} → action.motion_token "
+              "will be ZERO-FILLED. A VLA fine-tuned on this dataset will learn to emit null "
+              "tokens. Pass --encoder-onnx <model_encoder.onnx> or place it at the default path "
+              "to populate real tokens.")
 
     robot_model = get_g1_robot_model(
         waist_location=args.waist_location,
@@ -678,7 +903,15 @@ def main() -> None:
         "isaac_joint_names": isaac_joint_names,
         "gear_sonic_joint_names": list(robot_model.joint_names),
         "joints_zero_filled_in_state": body_missing,
-        "zero_filled_fields": ZERO_FILLED_FIELDS,
+        "zero_filled_fields": (
+            [f for f in ZERO_FILLED_FIELDS if f != "action.motion_token"]
+            if encoder_session is not None else ZERO_FILLED_FIELDS
+        ),
+        "motion_token_source": (
+            "encoder model_encoder.onnx (G1 mode, reference-bypass; mirrors "
+            "eval_parquet_sonic.py reference path)"
+            if encoder_session is not None else "ZERO-FILLED (no --encoder-onnx)"
+        ),
         "action_wbc_source": "robot0_joint_pos via name-based permutation",
         "notes": (
             "VLA fine-tuning primary targets per the SONIC paper are the "
@@ -723,6 +956,8 @@ def main() -> None:
                 expected_right_body_name=expected_right_body,
                 rollout_index=i,
                 max_frames=max_frames,
+                encoder_session=encoder_session,
+                enc_input_name=enc_input_name,
             )
             total_frames += written
         except Exception as exc:  # noqa: BLE001
@@ -732,8 +967,15 @@ def main() -> None:
     print(
         f"[done] wrote {total_frames} frames across {len(rollouts)} episode(s) -> {save_root}"
     )
+    if encoder_session is not None:
+        print("[done] action.motion_token POPULATED via the encoder (G1-mode reference "
+              "bypass). Validate against eval_parquet_sonic.py before training: a few rows' "
+              "tokens should match the eval encoder output for the same frames.")
+        _remaining_zero = [f for f in ZERO_FILLED_FIELDS if f != "action.motion_token"]
+    else:
+        _remaining_zero = ZERO_FILLED_FIELDS
     print(
-        f"[done] zero-filled fields: {ZERO_FILLED_FIELDS}. "
+        f"[done] zero-filled fields: {_remaining_zero}. "
         "Run `process_dataset.py --no-remove-stale-smpl` (or skip post-processing) "
         "to avoid dropping frames with zero SMPL."
     )

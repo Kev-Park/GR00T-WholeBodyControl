@@ -31,9 +31,13 @@ For each row t in episode parquet:
     1. Window lookup: ref_window = motion.reference_qpos[clip(t + [0,5,...,45], 0, N-1)]
                                                                   shape (10, 36)
     2. Lower-body (MJ order):
-         joints_gs = ref_window[:, 7:36]                          # (10, 29) gear_sonic
-         lb_pos    = joints_gs[:, MUJOCO_TO_ISAACLAB[:12]]        # (10, 12) MJ order
-         lb_vel    = np.gradient(lb_pos, 5/50, axis=0)            # 100ms step
+         lb_pos = ref_window[:, 7:7+12]                           # (10, 12) MJ order
+         lb_vel = np.gradient(lb_pos, 5/50, axis=0)               # 100ms step
+         # gear_sonic.joint_names is MUJOCO-grouped (verified via
+         # features_sonic_vla.py::_get_joint_group_slices, which requires each joint
+         # group to occupy a contiguous range). Lower body = first 12 entries directly,
+         # no SONIC-interleaved permutation needed (MUJOCO_TO_ISAACLAB only applies to
+         # the UTM decoder's output, not encoder input).
     3. Anchor (current frame, world frame):
          anchor_pos_w     = motion.reference_qpos[t, 0:3]
          anchor_quat_wxyz = motion.reference_qpos[t, 3:7]
